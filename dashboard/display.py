@@ -40,9 +40,12 @@ def _spark(values: deque, lo: float = 0.0, hi: float = 1.0) -> str:
     return "".join(out)
 
 
-def _score_style(s: float) -> str:
-    if s < 0.4: return "bold green"
-    if s < 0.7: return "bold yellow"
+def _score_style(s: float, threshold: float = 0.70) -> str:
+    """Color the congestion score relative to the actual adaptive threshold."""
+    if s < threshold * 0.55:
+        return "bold green"
+    if s < threshold:
+        return "bold yellow"
     return "bold red"
 
 
@@ -63,6 +66,16 @@ def _age(ts: float) -> str:
     s = time.time() - ts
     if s < 60: return f"{s:.0f}s"
     return f"{s/60:.0f}m"
+
+
+def _current_phase(events: list) -> Optional[str]:
+    """Return the label of the most recent DEMO phase event, if any."""
+    for ts, tag, msg in (events or []):
+        if tag == "DEMO" and msg.startswith("Phase"):
+            return msg.split("—")[0].strip()
+        if tag == "SNAPSHOT" and "post_recovery" not in msg:
+            pass  # keep looking
+    return None
 
 
 def build_layout(
@@ -95,14 +108,22 @@ def build_layout(
     fault_active = fault_injector and fault_injector.active
     fault_style = "bold red" if fault_active else "green"
 
+    adaptive_t = getattr(decision_engine, "adaptive_threshold", 0.70) if decision_engine else 0.70
+
     ie = inference_engine
     hdr = Text()
     hdr.append("EDGE-NET-X PRO  ", style="bold cyan")
     hdr.append(f"uptime {uptime:.0f}s  ")
     if ie:
+        infer_rate = ie.inference_count / max(uptime, 1.0)
         hdr.append(f"ML {ie.device_name}  ")
-        hdr.append(f"infer: {ie.last_single_latency_ms:.2f}ms  ")
-        hdr.append(f"total: {ie.inference_count}  ")
+        hdr.append(f"lat: {ie.last_single_latency_ms:.2f}ms  ")
+        hdr.append(f"rate: {infer_rate:.1f}/s  ")
+
+    phase = _current_phase(events)
+    if phase:
+        hdr.append(f"[{phase}]  ", style="bold white")
+
     hdr.append("fault: ", style="bold")
     hdr.append(fault_desc, style=fault_style)
     layout["header"].update(Panel(hdr, box=box.SIMPLE))
@@ -127,7 +148,7 @@ def build_layout(
             breaches = sla.get(name, 0)
             label = Text(name, style=f"bold {colors[name]}")
             if breaches > 0:
-                label.append(f" ⚠{breaches}", style="red")
+                label.append(f" ⚠{breaches}", style="bold red")
             t.add_row(
                 label,
                 f"{s.bandwidth_mbps:.1f}",
@@ -142,25 +163,27 @@ def build_layout(
 
     # ── ML + adaptive threshold ──────────────────────────────────────────────
     score = state.congestion_score if state else 0.0
-    adaptive_t = getattr(decision_engine, "adaptive_threshold", 0.70) if decision_engine else 0.70
     spark = _spark(score_history)
 
     ml = Text()
     ml.append("Congestion Score\n", style="bold")
-    ml.append(f"  {score:.4f}\n", style=_score_style(score))
-    ml.append(f"\n  {spark}\n\n", style=_score_style(score))
+    ml.append(f"  {score:.4f}\n", style=_score_style(score, adaptive_t))
+    ml.append(f"\n  {spark}\n\n", style=_score_style(score, adaptive_t))
     ml.append("Adaptive threshold\n", style="dim")
-    ml.append(f"  fire:  {adaptive_t:.3f}\n")
-    ml.append(f"  clear: {adaptive_t*0.7:.3f}\n\n")
+    ml.append(f"  fire:     {adaptive_t:.3f}\n")
+    ml.append(f"  low band: {adaptive_t*0.7:.3f}\n\n")
 
-    if sla:
+    any_breaches = any(cnt > 0 for cnt in sla.values()) if sla else False
+    if sla and any_breaches:
         ml.append("SLA breaches\n", style="dim")
         for sn, cnt in sla.items():
-            style = "red" if cnt > 10 else ("yellow" if cnt > 0 else "green")
-            ml.append(f"  {sn}: {cnt}\n", style=style)
+            if cnt > 0:
+                style = "red" if cnt > 10 else "yellow"
+                ml.append(f"  {sn}: {cnt}\n", style=style)
+        ml.append("\n")
 
     if state:
-        ml.append(f"\nTotal TP: {state.total_throughput_mbps:.2f} Mbps\n")
+        ml.append(f"Total TP: {state.total_throughput_mbps:.2f} Mbps\n")
 
     layout["ml"].update(Panel(ml, title="[bold]ML Prediction", border_style="magenta"))
 
@@ -177,7 +200,7 @@ def build_layout(
         "ROLLBACK": "bold yellow",
         "SLA":      "red",
         "SNAPSHOT": "bold blue",
-        "DEMO":     "dim white",
+        "DEMO":     "bold white",   # phase markers should stand out
     }
 
     combined = []
@@ -197,7 +220,7 @@ def build_layout(
     layout["timeline"].update(Panel(tl, title="[bold]Story Timeline", border_style="green"))
 
     # ── Bandwidth bars ───────────────────────────────────────────────────────
-    total_bw = 100.0
+    total_bw = DEFAULT_CONFIG.total_bandwidth_mbps
     bars = Text()
     if state:
         for name, s in state.slices.items():
@@ -211,7 +234,7 @@ def build_layout(
             bars.append(f"  {name:<12}", style=f"bold {c}")
             bars.append(f" {bar} ", style=c)
             bars.append(f" {s.bandwidth_mbps:5.1f} Mbps ({pct*100:.0f}%)  ")
-            bars.append(status + "\n", style="green" if lat_ok else "red")
+            bars.append(status + "\n", style="green" if lat_ok else "bold red")
     layout["alloc"].update(Panel(bars, title="[bold]Bandwidth Allocation", border_style="cyan"))
 
     return layout
