@@ -54,6 +54,15 @@ Traffic Generators (TCP + UDP)
 
 ## Key Design Decisions
 
+### Adaptive thresholding
+The decision engine tracks the variance of recent ML congestion scores. When variance is low (system stable), it lowers the firing threshold — catching congestion earlier. When variance is high (system oscillating from too-frequent decisions), it raises the threshold to reduce churn. This self-tuning loop prevents the classic oscillation problem in control systems without requiring manual tuning.
+
+### SLA breach detection
+Every decision engine tick checks each slice's measured latency against its configured latency budget (CRITICAL: 2ms, STANDARD: 10ms, BACKGROUND: 50ms). Breaches are counted, logged to the event timeline, and exported as `edge_net_x_sla_violations_total` Prometheus counters. This gives operators actionable signal beyond the congestion score.
+
+### REST API design
+The control API uses only Python stdlib (`asyncio.start_server`) — no aiohttp, FastAPI, or extra deps. This demonstrates that async HTTP handling from first principles is ~80 lines of code. The API enables Grafana integration, external orchestrators, and scripted fault injection for testing.
+
 ### Why asyncio for networking?
 A single-threaded asyncio event loop handles thousands of concurrent connections via I/O multiplexing, matching how real 5G control-plane software is structured. Each flow client is an asyncio task — no OS thread overhead.
 
@@ -80,12 +89,14 @@ A shared `fault_state` dict is read by every `SliceQueue` on each packet. Inject
 | Directory | Purpose |
 |-----------|---------|
 | `network/` | Async TCP + UDP server; multi-flow traffic generators |
-| `telemetry/` | Async rolling-window metrics collector |
-| `ml/` | CongestionLSTM model, synthetic training, GPU inference engine |
-| `decision/` | Adaptive control engine with hysteresis, cooldown, rollback |
+| `telemetry/` | Async rolling-window metrics collector (200 samples, 100ms ticks) |
+| `ml/` | CongestionLSTM, synthetic training with early stopping, GPU inference |
+| `decision/` | Adaptive control engine: hysteresis, cooldown, rollback, SLA detection |
 | `slicing/` | Token-bucket scheduler, per-slice bandwidth enforcement |
 | `simulation/` | Fault injector, automated demo scenario |
 | `dashboard/` | Rich terminal live dashboard |
+| `api/` | REST control plane API (stdlib asyncio, zero extra deps) |
+| `metrics/` | Prometheus text format exporter |
 
 ## Installation
 
@@ -108,7 +119,56 @@ python main.py --no-demo
 python main.py --inject latency_spike
 python main.py --inject packet_loss
 python main.py --inject slowdown
+
+# Custom API port
+python main.py --api-port 9090
 ```
+
+## REST Control API
+
+The system exposes a REST API on `http://127.0.0.1:8080` (default):
+
+```bash
+# Full system snapshot
+curl http://127.0.0.1:8080/api/status
+
+# Current bandwidth allocations
+curl http://127.0.0.1:8080/api/bandwidth
+
+# Override allocations at runtime
+curl -X POST http://127.0.0.1:8080/api/bandwidth \
+     -d '{"CRITICAL": 70, "STANDARD": 20, "BACKGROUND": 10}'
+
+# Inject a fault (optional ?duration=30 seconds)
+curl -X POST "http://127.0.0.1:8080/api/fault/inject/latency_spike?duration=30"
+curl -X POST "http://127.0.0.1:8080/api/fault/inject/packet_loss?duration=20"
+
+# Clear active fault
+curl -X POST http://127.0.0.1:8080/api/fault/clear
+
+# Last 10 control-plane decisions
+curl http://127.0.0.1:8080/api/decisions
+
+# Prometheus metrics
+curl http://127.0.0.1:8080/metrics
+```
+
+## Prometheus Metrics
+
+The `/metrics` endpoint exports Prometheus-compatible gauges and counters:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `edge_net_x_slice_latency_ms{slice}` | gauge | Mean latency per slice |
+| `edge_net_x_slice_throughput_mbps{slice}` | gauge | Throughput per slice |
+| `edge_net_x_slice_packet_loss_pct{slice}` | gauge | Packet loss per slice |
+| `edge_net_x_slice_bandwidth_mbps{slice}` | gauge | Current allocation |
+| `edge_net_x_congestion_score` | gauge | ML congestion probability |
+| `edge_net_x_sla_violations_total{slice}` | counter | Cumulative SLA breaches |
+| `edge_net_x_decisions_total` | counter | Control-plane decisions |
+| `edge_net_x_rollbacks_total` | counter | Rolled-back decisions |
+| `edge_net_x_ml_inferences_total` | counter | Total ML inferences |
+| `edge_net_x_ml_single_inference_ms` | gauge | Inference latency |
 
 ## Benchmark
 
