@@ -308,17 +308,3 @@ edge-net-x/
 ```
 
 ---
-
-## Design Decisions
-
-**Why simulate latency with asyncio.sleep rather than real network delay?**
-The system uses a token bucket + configurable base latency per slice. The measured RTT on loopback is 0.3ms. By adding simulated delay, the CRITICAL slice shows ~1ms and BACKGROUND ~20ms, which models real-world differentiation without requiring physical network hardware. The delay responds dynamically to queue depth — deeper queues produce longer delays, exactly as real queuing theory predicts.
-
-**Why a LSTM instead of a simpler model?**
-Congestion has temporal structure — a single high-latency sample could be a transient spike or the start of a persistent overload. The LSTM captures the trajectory of metrics over time, not just the instantaneous value. A threshold on raw latency would fire too early (on spikes) or too late (on gradual degradation).
-
-**Why adaptive thresholding?**
-A fixed threshold causes oscillation under certain load patterns. If the system is making decisions every 3 seconds, the variance of the ML score increases, which raises the threshold, which reduces decision frequency. This is a self-stabilizing feedback loop.
-
-**Why rollback?**
-Not every reallocation improves things. If the CRITICAL slice gets more bandwidth but the congestion was caused by a different bottleneck (say, the TCP receiver window), the reallocation is wasteful. The 5-second rollback window detects this and reverts, preventing wasted capacity.
