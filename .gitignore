@@ -13,3 +13,5 @@ env/
 *.pt
 *.pth
 .DS_Store
+.gstack/
+.venv/

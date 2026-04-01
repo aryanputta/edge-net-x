@@ -128,26 +128,55 @@ def train_model(
     criterion = nn.BCELoss()
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
 
-    X, y = generate_training_data(2000, seq_len)
+    X, y = generate_training_data(2400, seq_len)
     X, y = X.to(device), y.to(device)
 
-    n = len(X)
+    # 80/20 train/val split for early stopping
+    split = int(len(X) * 0.8)
+    X_train, X_val = X[:split], X[split:]
+    y_train, y_val = y[:split], y[split:]
+
+    n = len(X_train)
+    best_val_loss = float("inf")
+    best_state = None
+    patience = 5
+    patience_counter = 0
+
     model.train()
     for epoch in range(epochs):
         idx = torch.randperm(n)
-        X, y = X[idx], y[idx]
-        total_loss = 0.0
+        X_train, y_train = X_train[idx], y_train[idx]
         for i in range(0, n, batch_size):
-            xb = X[i:i + batch_size]
-            yb = y[i:i + batch_size]
+            xb = X_train[i:i + batch_size]
+            yb = y_train[i:i + batch_size]
             optimizer.zero_grad()
             pred = model(xb)
             loss = criterion(pred, yb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            total_loss += loss.item()
+
+        # Validation loss for early stopping
+        model.eval()
+        with torch.no_grad():
+            val_pred = model(X_val)
+            val_loss = criterion(val_pred, y_val).item()
+        model.train()
+
+        if val_loss < best_val_loss - 1e-4:
+            best_val_loss = val_loss
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                break
+
         scheduler.step()
+
+    # Restore best weights
+    if best_state is not None:
+        model.load_state_dict(best_state)
 
     model.eval()
     return model

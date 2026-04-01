@@ -63,10 +63,12 @@ class TCPFlowClient:
         self._running = False
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
+        self._pending: Dict[int, float] = {}  # seq -> send timestamp, shared by both loops
 
     async def run(self):
         self._running = True
         while self._running:
+            self._pending.clear()
             try:
                 self._reader, self._writer = await asyncio.open_connection(
                     self._host, self._port
@@ -84,14 +86,13 @@ class TCPFlowClient:
 
     async def _send_loop(self):
         interval = 1.0 / self._p.packets_per_second
-        pending: Dict[int, float] = {}
 
         while self._running and self._writer and not self._writer.is_closing():
             size = random.randint(self._p.min_size, self._p.max_size)
             seq = self._seq
             self._seq += 1
             ts = time.monotonic()
-            pending[seq] = ts
+            self._pending[seq] = ts
 
             msg = json.dumps({
                 "flow_id": self._p.flow_id,
@@ -107,15 +108,15 @@ class TCPFlowClient:
             except Exception:
                 break
 
-            # Clean up stale pending (>5s old)
+            # Clean up stale entries (>5s)
             cutoff = ts - 5.0
-            for old_seq in [k for k, v in pending.items() if v < cutoff]:
-                del pending[old_seq]
+            stale = [k for k, v in self._pending.items() if v < cutoff]
+            for k in stale:
+                del self._pending[k]
 
             await asyncio.sleep(interval)
 
     async def _recv_loop(self):
-        pending_start: Dict[int, float] = {}
         while self._running and self._reader:
             try:
                 data = await asyncio.wait_for(self._reader.readexactly(8), timeout=1.0)
@@ -124,11 +125,10 @@ class TCPFlowClient:
             except Exception:
                 break
             seq, _ = struct.unpack(">II", data)
-            rtt = (time.monotonic() - self._seq_ts(seq)) * 1000.0
-            await self._rtt_sink.put((self._p.flow_id, self._p.slice_type.value, rtt, False))
-
-    def _seq_ts(self, seq: int) -> float:
-        return time.monotonic() - 0.001  # fallback
+            sent_at = self._pending.pop(seq, None)
+            if sent_at is not None:
+                rtt = (time.monotonic() - sent_at) * 1000.0
+                await self._rtt_sink.put((self._p.flow_id, self._p.slice_type.value, rtt, False))
 
     def stop(self):
         self._running = False

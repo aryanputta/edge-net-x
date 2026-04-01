@@ -12,6 +12,7 @@ Layout:
   │  Bandwidth allocation bar chart per slice                       │
   └─────────────────────────────────────────────────────────────────┘
 """
+import asyncio
 import time
 import math
 from collections import deque
@@ -231,6 +232,3 @@ class Dashboard:
 
     def stop(self):
         self._running = False
-
-
-import asyncio

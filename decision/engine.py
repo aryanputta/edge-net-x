@@ -28,6 +28,12 @@ class DecisionEngine:
         self._slicer = slicer
         self._telemetry = telemetry
 
+        # Snapshot original allocations before any mutations so _act_normal
+        # can rebalance to the startup values rather than the current (modified) ones.
+        self._original_allocations: Dict[str, float] = {
+            name: sc.bandwidth_mbps for name, sc in config.slices.items()
+        }
+
         self._high_count: int = 0
         self._low_count: int = 0
         self._last_action_time: float = 0.0
@@ -134,10 +140,9 @@ class DecisionEngine:
 
     async def _act_normal(self, state: NetworkState, score: float):
         alloc = self._slicer.current_allocations()
-        cfg = self._cfg.slices
 
-        # Gently rebalance toward defaults
-        defaults = {name: sc.bandwidth_mbps for name, sc in cfg.items()}
+        # Gently rebalance toward original startup allocations (not mutated values)
+        defaults = self._original_allocations
         new_alloc = {}
         for name in alloc:
             diff = defaults[name] - alloc[name]
@@ -187,6 +192,8 @@ class DecisionEngine:
 
     def update_congestion_score(self, score: float):
         """Called by the ML inference loop to push the latest score."""
+        # Persist so telemetry ticks don't reset it to 0
+        self._telemetry._last_congestion_score = score
         state = self._telemetry.current_state
         if state:
             state.congestion_score = score

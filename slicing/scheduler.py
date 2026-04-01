@@ -7,6 +7,7 @@ delay is computed from the virtual queue depth so that simulated latency
 responds realistically to slice bandwidth changes.
 """
 import asyncio
+import random
 import time
 from collections import deque
 from typing import Dict, Optional
@@ -115,7 +116,6 @@ class SliceQueue:
             fault_ms = 0.0
             fault = self._fault_state
             if fault.get("active"):
-                import random
                 if fault.get("type") == "latency_spike":
                     fault_ms = fault.get("magnitude_ms", 0.0)
                 elif fault.get("type") == "packet_loss":

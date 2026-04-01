@@ -72,6 +72,7 @@ class TelemetryCollector:
         # Telemetry window for ML: list of (timestamp, feature_vector)
         self._ml_window: deque = deque(maxlen=config.ml_window_size)
         self._state: Optional[NetworkState] = None
+        self._last_congestion_score: float = 0.0  # preserved across ticks
 
     @property
     def ml_window(self) -> deque:
@@ -122,7 +123,11 @@ class TelemetryCollector:
                 active_flows=len(self._active_flows[name]),
             )
         total_tp = sum(s.throughput_mbps for s in slices.values())
-        self._state = NetworkState(slices=slices, total_throughput_mbps=total_tp)
+        self._state = NetworkState(
+            slices=slices,
+            total_throughput_mbps=total_tp,
+            congestion_score=self._last_congestion_score,
+        )
 
         # Build feature vector for ML window: aggregate across all slices
         features = self._aggregate_features(slices)
