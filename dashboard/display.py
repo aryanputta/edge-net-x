@@ -144,11 +144,18 @@ def build_layout(
     ml_text.append("History (40 ticks):\n", style="dim")
     ml_text.append(f"  {spark}\n\n", style=score_color)
     ml_text.append("Thresholds:\n", style="dim")
-    ml_text.append("  High:  0.70 → reallocate\n")
-    ml_text.append("  Reset: 0.50 → rebalance\n\n")
+    adaptive_t = getattr(decision_engine, "adaptive_threshold", 0.70) if decision_engine else 0.70
+    ml_text.append(f"  Adaptive: {adaptive_t:.3f} → reallocate\n")
+    ml_text.append(f"  Reset:    {adaptive_t*0.7:.3f} → rebalance\n\n")
+    sla_counts = getattr(decision_engine, "sla_breach_counts", {}) if decision_engine else {}
+    if sla_counts:
+        ml_text.append("SLA Breaches:\n", style="dim")
+        for sn, cnt in sla_counts.items():
+            color = "red" if cnt > 10 else ("yellow" if cnt > 0 else "green")
+            ml_text.append(f"  {sn}: {cnt}\n", style=color)
     if state:
         tp = state.total_throughput_mbps
-        ml_text.append(f"Total throughput: {tp:.2f} Mbps\n")
+        ml_text.append(f"\nTotal throughput: {tp:.2f} Mbps\n")
     layout["ml"].update(Panel(ml_text, title="[bold]ML Prediction", border_style="magenta"))
 
     # ── Event timeline ───────────────────────────────────────────────
@@ -163,7 +170,7 @@ def build_layout(
         color = "red" if action.rolled_back else "cyan"
         combined.append((action.timestamp, tag, color, action.description))
     for ts, tag, msg in (events or [])[:5]:
-        color = "red" if tag == "FAULT" else ("green" if tag == "CLEAR" else "yellow")
+        color = "red" if tag in ("FAULT", "SLA") else ("green" if tag == "CLEAR" else "yellow")
         combined.append((ts, tag, color, msg))
     combined.sort(key=lambda x: x[0], reverse=True)
 

@@ -26,6 +26,7 @@ class SystemConfig:
     tcp_host: str = "127.0.0.1"
     tcp_port: int = 7000
     udp_port: int = 7001
+    api_port: int = 8080
     dashboard_refresh_hz: float = 5.0
 
     slices: Dict[str, SliceConfig] = field(default_factory=lambda: {

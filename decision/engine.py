@@ -9,8 +9,11 @@ Design guarantees:
   - Cooldown: minimum interval between consecutive decisions
   - Rollback: if metrics don't improve within the rollback window, revert
   - Starvation prevention: BACKGROUND slice always keeps min_bandwidth_mbps
+  - Adaptive thresholding: adjusts congestion threshold based on system variance
+  - SLA breach detection: emits events when latency exceeds per-slice budget
 """
 import asyncio
+import math
 import time
 import logging
 from collections import deque
@@ -22,11 +25,43 @@ from models import DecisionAction, NetworkState
 logger = logging.getLogger(__name__)
 
 
+class AdaptiveThreshold:
+    """
+    Adjusts the congestion firing threshold based on recent score variance.
+
+    When the system is stable (low variance), lower the threshold to catch
+    congestion earlier. When the system is oscillating (high variance), raise
+    it to reduce unnecessary decisions.
+    """
+
+    def __init__(self, base: float = 0.70, min_t: float = 0.55, max_t: float = 0.85):
+        self._base = base
+        self._min = min_t
+        self._max = max_t
+        self._history: deque = deque(maxlen=30)
+        self.current = base
+
+    def update(self, score: float) -> float:
+        self._history.append(score)
+        if len(self._history) < 10:
+            return self.current
+        mean = sum(self._history) / len(self._history)
+        variance = sum((x - mean) ** 2 for x in self._history) / len(self._history)
+        std = math.sqrt(variance)
+
+        # High variance → raise threshold (system oscillating, be conservative)
+        # Low variance  → lower threshold (system stable, catch congestion early)
+        adjustment = (std - 0.15) * 0.5    # neutral at std=0.15
+        self.current = max(self._min, min(self._max, self._base + adjustment))
+        return self.current
+
+
 class DecisionEngine:
-    def __init__(self, config: SystemConfig, slicer, telemetry):
+    def __init__(self, config: SystemConfig, slicer, telemetry, events: list = None):
         self._cfg = config
         self._slicer = slicer
         self._telemetry = telemetry
+        self._events = events or []
 
         # Snapshot original allocations before any mutations so _act_normal
         # can rebalance to the startup values rather than the current (modified) ones.
@@ -43,6 +78,16 @@ class DecisionEngine:
         self._pending_rollback: Optional[Dict] = None
         self._rollback_at: float = 0.0
 
+        # Adaptive threshold
+        self._adaptive = AdaptiveThreshold(
+            base=config.congestion_threshold,
+            min_t=config.congestion_threshold - 0.15,
+            max_t=config.congestion_threshold + 0.15,
+        )
+
+        # SLA breach tracking
+        self._sla_breach_counts: Dict[str, int] = {k: 0 for k in config.slices}
+
     async def run(self):
         self._running = True
         while self._running:
@@ -58,20 +103,24 @@ class DecisionEngine:
             score = state.congestion_score
             now = time.monotonic()
 
+            # Update adaptive threshold based on recent score variance
+            effective_threshold = self._adaptive.update(score)
+
+            # SLA breach detection
+            self._check_sla_breaches(state, now)
+
             # Check rollback
             if self._pending_rollback and now >= self._rollback_at:
                 await self._maybe_rollback(state)
 
-            # Hysteresis counter
-            if score >= self._cfg.congestion_threshold:
+            # Hysteresis counter — uses adaptive threshold
+            if score >= effective_threshold:
                 self._high_count += 1
                 self._low_count = 0
-            elif score <= self._cfg.hysteresis_threshold:
+            elif score <= effective_threshold * 0.7:  # clear band below threshold
                 self._high_count = 0
                 self._low_count += 1
-            else:
-                # In the dead-band — don't reset either counter
-                pass
+            # else: in dead-band — don't reset either counter
 
             cooldown_ok = (now - self._last_action_time) >= self._cfg.decision_cooldown_s
 
@@ -189,6 +238,28 @@ class DecisionEngine:
                 )
                 self.actions.appendleft(rollback_action)
                 logger.info("Decision: rollback applied")
+
+    def _check_sla_breaches(self, state: NetworkState, now: float):
+        for name, s in state.slices.items():
+            budget = self._cfg.slices[name].latency_budget_ms
+            if s.latency_ms > budget and s.latency_ms > 0:
+                self._sla_breach_counts[name] = self._sla_breach_counts.get(name, 0) + 1
+                if self._sla_breach_counts[name] % 5 == 1:  # log every 5th breach
+                    msg = (
+                        f"SLA BREACH: {name} latency {s.latency_ms:.1f}ms "
+                        f"exceeds budget {budget:.0f}ms "
+                        f"(#{self._sla_breach_counts[name]})"
+                    )
+                    self._events.insert(0, (time.time(), "SLA", msg))
+                    logger.warning(msg)
+
+    @property
+    def adaptive_threshold(self) -> float:
+        return self._adaptive.current
+
+    @property
+    def sla_breach_counts(self) -> Dict[str, int]:
+        return dict(self._sla_breach_counts)
 
     def update_congestion_score(self, score: float):
         """Called by the ML inference loop to push the latest score."""
