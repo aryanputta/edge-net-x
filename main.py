@@ -30,7 +30,7 @@ from ml.inference import build_inference_engine
 from decision.engine import DecisionEngine
 from slicing.scheduler import NetworkSlicer
 from simulation.fault import FaultInjector
-from simulation.traffic import TrafficScenario
+from simulation.demo import DemoScenario
 from dashboard.display import Dashboard
 from api.server import ControlAPI
 from metrics.prometheus import PrometheusRegistry
@@ -105,7 +105,7 @@ async def main(run_demo: bool, manual_fault: str | None, api_port: int):
             fault_injector.inject(manual_fault, duration_s=30.0)
         asyncio.create_task(inject_after_delay())
 
-    scenario = TrafficScenario(fault_injector, events)
+    scenario = DemoScenario(fault_injector, events, lambda: telemetry.current_state)
 
     print(f"ML device:   {device_desc}")
     print(f"Control API: http://127.0.0.1:{api_port}/api/status")
@@ -127,7 +127,7 @@ async def main(run_demo: bool, manual_fault: str | None, api_port: int):
                 inference_engine=inference_engine,
                 start_time=start_time,
             ),
-            *([scenario.run_demo()] if run_demo else []),
+            *([scenario.run()] if run_demo else []),
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
